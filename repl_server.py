@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Persistent Python REPL Server for RLM Sandbox.
 
