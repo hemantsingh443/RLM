@@ -1,0 +1,25 @@
+The quick brown fox jumps over the lazy dog. This is a simple test document.
+
+Chapter 1: Introduction
+This is the first chapter of our test document. It contains some sample text that we can use to test the RLM engine. The main purpose is to verify that the context loading and basic operations work correctly.
+
+Chapter 2: Main Content
+Here we have the main content of our document. This section includes various topics and information that the RLM agent can analyze. For example:
+- Point one: Testing basic text extraction
+- Point two: Verifying search functionality
+- Point three: Checking summarization capabilities
+
+Some important facts mentioned in this document:
+1. The project deadline is December 31, 2024
+2. The team consists of 5 members
+3. The budget is $50,000
+
+Chapter 3: Conclusion
+In conclusion, this test document serves as a simple example for testing the RLM engine. It has multiple sections, bullet points, and key information that can be extracted through recursive analysis.
+
+Key takeaways:
+- The system should be able to identify chapters
+- It should extract specific information like dates and numbers
+- It should summarize content when asked
+
+End of document.
