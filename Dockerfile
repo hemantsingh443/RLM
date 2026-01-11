@@ -5,13 +5,24 @@ RUN pip install --no-cache-dir \
     requests \
     numpy \
     pandas \
-    regex
+    regex \
+    fastapi \
+    uvicorn[standard]
 
-# Create working directory
+# Create directories
 WORKDIR /app
+RUN mkdir -p /mnt/data
 
-# Copy the REPL server
+# Copy the server
 COPY repl_server.py .
 
-# Run the REPL server (unbuffered output)
+# Expose HTTP port
+EXPOSE 8080
+
+# Environment defaults
+ENV PORT=8080
+ENV HOST=0.0.0.0
+ENV RLM_MAX_RECURSION_DEPTH=3
+
+# Run the HTTP server
 CMD ["python", "-u", "repl_server.py"]

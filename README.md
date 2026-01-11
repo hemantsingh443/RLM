@@ -1,129 +1,138 @@
 # RLM Engine - Recursive Language Model
 
-An inference engine that enables LLMs to analyze documents of **any size** by treating them as external variables in a sandboxed Python environment. Based on the methodology from [Zhang et al. (MIT CSAIL)](https://arxiv.org/abs/2512.24601).
+An inference engine that enables LLMs to analyze documents and **codebases of any size** by treating them as external variables in a sandboxed Python environment. Based on the methodology from [Zhang et al. (MIT CSAIL)](https://arxiv.org/abs/2512.24601).
 
-## How It Works
+## Features
 
-Instead of stuffing a 10M+ token document into a context window, RLM:
-
-1. **Loads the document** into a persistent Python environment as a `context` variable
-2. **The LLM writes code** to explore, search, and extract relevant sections
-3. **Recursive sub-agents** can be spawned via `llm_query()` to analyze chunks
-4. **Multi-turn iteration** continues until the task is complete
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  User Query: "Summarize chapter 3"                          │
-└─────────────────┬───────────────────────────────────────────┘
-                  ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Root Agent (LLM)                                           │
-│  - Writes: chapters = context.split("Chapter")              │
-│  - Writes: summary = llm_query(f"Summarize: {chapters[3]}") │
-└─────────────────┬───────────────────────────────────────────┘
-                  ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Docker Sandbox                                             │
-│  - Executes code in persistent Python REPL                  │
-│  - context variable holds entire document in memory         │
-│  - llm_query() spawns sub-agent calls                       │
-└─────────────────────────────────────────────────────────────┘
-```
+- **Unlimited Context** - Documents/directories loaded into sandbox memory, not LLM context window
+- **Directory Analysis** - Analyze entire codebases with `list_files()`, `read_file()`, `search_files()`
+- **Recursive Agents** - `llm_query()` spawns sub-agents for chunk analysis
+- **Remote Deployment** - HTTP API for deploying as a remote service
+- **Persistent State** - Variables persist across turns
 
 ## Quick Start
 
 ### 1. Setup
 
 ```bash
-# Clone and enter directory
 cd RLM
-
-# Create virtual environment
 python -m venv env
 source env/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Add your OpenRouter API key
 echo "OPENROUTER_API_KEY=your-key-here" > .env
 ```
 
-### 2. Build Docker Image
+### 2. Single File Analysis (Local Docker)
 
 ```bash
+# Build the sandbox image
 docker build -t rlm-sandbox .
+
+# Analyze a single file
+python main.py "Summarize the main themes" book.txt
+python main.py "Find all function definitions" code.py --type "Python code"
 ```
 
-### 3. Run a Query
+### 3. Directory Analysis (Remote Server)
 
 ```bash
-python main.py "What are the main themes?" book.txt
-python main.py "Find all function definitions" code.py --type "Python code"
-python main.py "Summarize the conclusions" paper.txt --max-turns 20
+# Start the remote server with your codebase mounted
+docker run -d --name rlm-server \
+    -p 8080:8080 \
+    -v /path/to/your/project:/mnt/data:ro \
+    -e OPENROUTER_API_KEY=$OPENROUTER_API_KEY \
+    rlm-sandbox
+
+# Analyze the directory from any machine
+python main.py "Explain this codebase architecture" \
+    --remote http://localhost:8080 \
+    --directory /path/to/your/project
 ```
 
-## Features
+Or use docker-compose:
+```bash
+# Create data directory and copy your project
+mkdir data && cp -r /path/to/your/project/* data/
 
-| Feature | Description |
-|---------|-------------|
-| **Unlimited Context** | Documents loaded into sandbox memory, not LLM context |
-| **Persistent State** | Variables persist across turns |
-| **Recursive Agents** | `llm_query()` spawns sub-agents for chunk analysis |
-| **Code Execution** | LLM writes Python to search, extract, and process |
-| **Safety Limits** | Recursion depth guards, output truncation |
+# Start server
+docker-compose up -d
+
+# Query
+python main.py "Find security issues" --remote http://localhost:8080 --directory ./data
+```
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  User: "Explain this codebase"                              │
+└─────────────────┬───────────────────────────────────────────┘
+                  ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Root Agent (LLM)                                           │
+│  → files = list_files("*.py")                               │
+│  → content = read_file("main.py")                           │
+│  → summary = llm_query(f"Summarize: {content}")             │
+└─────────────────┬───────────────────────────────────────────┘
+                  ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Remote Sandbox (Docker)                                    │
+│  - HTTP API on port 8080                                    │
+│  - Files indexed from /mnt/data                             │
+│  - Persistent Python namespace                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/status` | GET | Health check, file count |
+| `/files` | GET | List indexed files |
+| `/file/{path}` | GET | Read a specific file |
+| `/execute` | POST | Execute Python code |
+| `/reindex` | POST | Re-scan the data directory |
+| `/reset` | POST | Clear the namespace |
+
+## CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `--directory`, `-d` | Path to directory (enables directory mode) |
+| `--remote`, `-r` | URL of remote sandbox server |
+| `--remote-key` | API key for remote authentication |
+| `--model`, `-m` | OpenRouter model (default: `xiaomi/mimo-v2-flash:free`) |
+| `--max-turns` | Max conversation turns (default: 15) |
+| `--type`, `-t` | Content type hint (e.g., "codebase", "book") |
+| `--quiet`, `-q` | Suppress verbose output |
+
+## Available Functions in Sandbox
+
+```python
+list_files(pattern="*")     # List files matching glob pattern
+read_file(path)             # Read a file's content
+search_files(regex, glob)   # Search across files
+llm_query(prompt, model)    # Spawn sub-agent for analysis
+get_file_tree()             # Get nested directory structure
+```
 
 ## Project Structure
 
 ```
 RLM/
 ├── main.py                 # CLI entry point
-├── Dockerfile              # Sandbox container
-├── repl_server.py          # Persistent Python REPL
-├── rlm/
-│   ├── agent.py            # Main orchestration loop
-│   ├── prompts.py          # System prompt templates
-│   ├── parser.py           # Response parsing
-│   └── clients/
-│       ├── openrouter.py   # LLM API client
-│       └── docker_sandbox.py # Container management
-└── test_data/
-    └── sample.txt          # Example document
+├── Dockerfile              # HTTP server container
+├── docker-compose.yml      # Easy deployment
+├── repl_server.py          # FastAPI + REPL server
+└── rlm/
+    ├── agent.py            # Main orchestration loop
+    ├── prompts.py          # System prompt templates
+    ├── parser.py           # Response parsing
+    └── clients/
+        ├── openrouter.py   # LLM API client
+        ├── docker_sandbox.py # Local Docker client
+        └── remote_sandbox.py # Remote HTTP client
 ```
-
-## Configuration
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--model` | `xiaomi/mimo-v2-flash:free` | OpenRouter model |
-| `--max-turns` | 15 | Maximum conversation turns |
-| `--type` | "text document" | Document type hint |
-| `--quiet` | false | Suppress verbose output |
-
-## How Recursion Works
-
-The LLM can spawn sub-agents to divide work:
-
-```python
-# Example code generated by the root agent:
-chunks = [context[i:i+5000] for i in range(0, len(context), 5000)]
-summaries = []
-for chunk in chunks[:5]:
-    # Each llm_query() call spawns a sub-agent
-    summary = llm_query(f"Summarize this section:\n{chunk}")
-    summaries.append(summary)
-final_summary = llm_query(f"Combine these summaries:\n{summaries}")
-```
-
-**Safety Limits:**
-- Max recursion depth: 3 (configurable via `RLM_MAX_RECURSION_DEPTH`)
-- Output truncation: 50,000 chars per execution
-
-## Requirements
-
-- Python 3.11+
-- Docker
-- OpenRouter API key
 
 ## License
 

@@ -1,9 +1,12 @@
+#!/usr/bin/env python3
 """
-Persistent Python REPL Server for RLM Sandbox.
+RLM Sandbox Server - Persistent Python REPL with HTTP API.
 
-This server maintains a global namespace across multiple code executions,
-allowing the LLM to build up state over multiple turns. It communicates
-via JSON over stdout, with logs going to stderr.
+This server provides:
+1. HTTP API for remote code execution
+2. Directory indexing and file access
+3. Persistent global namespace across executions
+4. llm_query() for recursive sub-agent calls
 """
 
 import sys
@@ -11,62 +14,174 @@ import os
 import io
 import json
 import traceback
+import glob
+import fnmatch
+import re
+from pathlib import Path
+from typing import Dict, List, Optional, Any
 from contextlib import redirect_stdout, redirect_stderr
 
-# Maximum output size to prevent memory explosion
+from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import uvicorn
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
 MAX_OUTPUT_SIZE = 50000  # characters
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB per file
+DATA_DIR = "/mnt/data"
+API_KEY = os.environ.get("RLM_API_KEY", "")  # Optional auth
 
-# Global namespace for persistent state
-global_namespace = {}
+# ============================================================================
+# Global State
+# ============================================================================
 
-# Use stderr for all logging to keep stdout clean for JSON only
-def log(message):
-    """Log a message to stderr (won't interfere with JSON on stdout)."""
-    sys.stderr.write(f"[REPL] {message}\n")
+# Persistent namespace for code execution
+global_namespace: Dict[str, Any] = {}
+
+# File index: path -> metadata
+file_index: Dict[str, Dict] = {}
+
+# ============================================================================
+# Helper Functions (exposed to LLM-generated code)
+# ============================================================================
+
+def log(message: str):
+    """Log to stderr."""
+    sys.stderr.write(f"[RLM] {message}\n")
     sys.stderr.flush()
+
+
+def list_files(pattern: str = "*") -> List[str]:
+    """
+    List all indexed files, optionally filtered by glob pattern.
+    
+    Args:
+        pattern: Glob pattern (e.g., "*.py", "src/**/*.js")
+    
+    Returns:
+        List of file paths
+    """
+    all_files = list(file_index.keys())
+    if pattern == "*":
+        return sorted(all_files)
+    return sorted([f for f in all_files if fnmatch.fnmatch(f, pattern)])
+
+
+def get_file_tree() -> Dict:
+    """
+    Get the file tree with metadata.
+    
+    Returns:
+        Nested dict representing directory structure
+    """
+    tree = {}
+    for path, meta in file_index.items():
+        parts = path.split('/')
+        current = tree
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = meta
+    return tree
+
+
+def read_file(path: str) -> str:
+    """
+    Read a file's content.
+    
+    Args:
+        path: Relative path from the data directory
+    
+    Returns:
+        File content as string
+    """
+    if path not in file_index:
+        # Try to find it
+        full_path = os.path.join(DATA_DIR, path)
+        if os.path.exists(full_path):
+            try:
+                with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
+                    return f.read()
+            except Exception as e:
+                return f"Error reading file: {e}"
+        return f"File not found: {path}"
+    
+    full_path = os.path.join(DATA_DIR, path)
+    try:
+        with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except Exception as e:
+        return f"Error reading file: {e}"
+
+
+def search_files(pattern: str, file_pattern: str = "*") -> List[Dict]:
+    """
+    Search for a regex pattern across all files.
+    
+    Args:
+        pattern: Regex pattern to search for
+        file_pattern: Glob pattern to filter files (e.g., "*.py")
+    
+    Returns:
+        List of matches with file, line number, and content
+    """
+    matches = []
+    regex = re.compile(pattern)
+    
+    for path in list_files(file_pattern):
+        content = read_file(path)
+        for i, line in enumerate(content.split('\n'), 1):
+            if regex.search(line):
+                matches.append({
+                    'file': path,
+                    'line': i,
+                    'content': line.strip()[:200]
+                })
+                if len(matches) >= 100:  # Limit results
+                    return matches
+    return matches
 
 
 def llm_query(prompt: str, model: str = "xiaomi/mimo-v2-flash:free") -> str:
     """
-    Synchronous call to OpenRouter API for recursive sub-agent calls.
+    Make a recursive LLM sub-call via OpenRouter.
     
     Args:
-        prompt: The prompt to send to the LLM
-        model: The model to use (defaults to free model)
+        prompt: The prompt to send
+        model: Model to use
     
     Returns:
-        The LLM response text
+        LLM response text
     """
     import requests
     
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        return "Error: OPENROUTER_API_KEY not set in environment"
+        return "Error: OPENROUTER_API_KEY not set"
     
-    # Recursion depth guard
     current_depth = int(os.environ.get("RLM_RECURSION_DEPTH", "0"))
     max_depth = int(os.environ.get("RLM_MAX_RECURSION_DEPTH", "3"))
     
     if current_depth >= max_depth:
-        return f"Error: Maximum recursion depth ({max_depth}) reached. Cannot make more llm_query calls."
+        return f"Error: Max recursion depth ({max_depth}) reached"
     
-    # Increment recursion depth for nested calls
     os.environ["RLM_RECURSION_DEPTH"] = str(current_depth + 1)
     
     try:
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/rlm-engine",
-            "X-Title": "RLM Engine Sub-Query"
         }
-        
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}]
         }
         
-        log(f"Making LLM query with model {model}...")
         resp = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             json=payload,
@@ -74,168 +189,248 @@ def llm_query(prompt: str, model: str = "xiaomi/mimo-v2-flash:free") -> str:
             timeout=120
         )
         resp.raise_for_status()
-        
-        result = resp.json()
-        return result['choices'][0]['message']['content']
-    
-    except requests.exceptions.RequestException as e:
-        return f"Error making LLM request: {str(e)}"
-    except (KeyError, IndexError) as e:
-        return f"Error parsing LLM response: {str(e)}"
+        return resp.json()['choices'][0]['message']['content']
+    except Exception as e:
+        return f"Error: {e}"
     finally:
-        # Decrement recursion depth after call completes
         os.environ["RLM_RECURSION_DEPTH"] = str(current_depth)
 
 
-def load_context():
-    """
-    Load the context file from the mounted volume.
-    Returns info message to include in ready response.
-    """
-    context_path = "/mnt/data/input.txt"
-    
-    if os.path.exists(context_path):
-        try:
-            with open(context_path, 'r', encoding='utf-8', errors='replace') as f:
-                context = f.read()
-            global_namespace['context'] = context
-            msg = f"Loaded context with {len(context)} characters ({len(context.split())} words)"
-            log(msg)
-            return msg
-        except Exception as e:
-            msg = f"Error loading context: {e}"
-            log(msg)
-            return msg
-    else:
-        log("No context file found at /mnt/data/input.txt")
-        global_namespace['context'] = ""
-        return "No context file found"
+# ============================================================================
+# Code Execution
+# ============================================================================
 
-
-def execute_code(code: str) -> dict:
-    """
-    Execute code in the persistent global namespace.
-    
-    Args:
-        code: Python code to execute
-    
-    Returns:
-        dict with 'output', 'error', and 'success' keys
-    """
+def execute_code(code: str) -> Dict:
+    """Execute code in the persistent namespace."""
     stdout_capture = io.StringIO()
     stderr_capture = io.StringIO()
     
     try:
         with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-            # Execute the code in our persistent namespace
             exec(code, global_namespace)
         
-        stdout_output = stdout_capture.getvalue()
-        stderr_output = stderr_capture.getvalue()
+        stdout = stdout_capture.getvalue()
+        stderr = stderr_capture.getvalue()
         
-        # Truncate if needed
-        if len(stdout_output) > MAX_OUTPUT_SIZE:
-            stdout_output = stdout_output[:MAX_OUTPUT_SIZE] + f"\n... [Output truncated at {MAX_OUTPUT_SIZE} chars]"
+        if len(stdout) > MAX_OUTPUT_SIZE:
+            stdout = stdout[:MAX_OUTPUT_SIZE] + f"\n... [Truncated at {MAX_OUTPUT_SIZE} chars]"
         
         return {
             "success": True,
-            "output": stdout_output,
-            "error": stderr_output if stderr_output else None
+            "output": stdout,
+            "error": stderr if stderr else None
         }
-    
     except Exception as e:
-        error_trace = traceback.format_exc()
         return {
             "success": False,
             "output": stdout_capture.getvalue(),
-            "error": error_trace
+            "error": traceback.format_exc()
         }
 
 
-def send_response(data: dict):
-    """Send a JSON response to stdout."""
-    sys.stdout.write(json.dumps(data) + "\n")
-    sys.stdout.flush()
+def index_directory(path: str = DATA_DIR) -> Dict[str, Dict]:
+    """Index all files in the data directory."""
+    global file_index
+    file_index = {}
+    
+    if not os.path.exists(path):
+        log(f"Data directory not found: {path}")
+        return file_index
+    
+    for root, dirs, files in os.walk(path):
+        # Skip hidden directories
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        
+        for fname in files:
+            if fname.startswith('.'):
+                continue
+            
+            full_path = os.path.join(root, fname)
+            rel_path = os.path.relpath(full_path, path)
+            
+            try:
+                stat = os.stat(full_path)
+                size = stat.st_size
+                
+                # Skip large files
+                if size > MAX_FILE_SIZE:
+                    continue
+                
+                # Detect file type
+                ext = os.path.splitext(fname)[1].lower()
+                file_type = {
+                    '.py': 'python',
+                    '.js': 'javascript',
+                    '.ts': 'typescript',
+                    '.jsx': 'react',
+                    '.tsx': 'react',
+                    '.java': 'java',
+                    '.c': 'c',
+                    '.cpp': 'cpp',
+                    '.h': 'header',
+                    '.go': 'go',
+                    '.rs': 'rust',
+                    '.rb': 'ruby',
+                    '.php': 'php',
+                    '.md': 'markdown',
+                    '.txt': 'text',
+                    '.json': 'json',
+                    '.yaml': 'yaml',
+                    '.yml': 'yaml',
+                    '.xml': 'xml',
+                    '.html': 'html',
+                    '.css': 'css',
+                    '.sql': 'sql',
+                    '.sh': 'shell',
+                }.get(ext, 'text')
+                
+                file_index[rel_path] = {
+                    'size': size,
+                    'type': file_type,
+                    'ext': ext
+                }
+            except Exception as e:
+                log(f"Error indexing {full_path}: {e}")
+    
+    log(f"Indexed {len(file_index)} files")
+    return file_index
+
+
+def initialize_namespace():
+    """Initialize the global namespace with helper functions."""
+    global_namespace['list_files'] = list_files
+    global_namespace['get_file_tree'] = get_file_tree
+    global_namespace['read_file'] = read_file
+    global_namespace['search_files'] = search_files
+    global_namespace['llm_query'] = llm_query
+    global_namespace['files'] = file_index
+
+
+# ============================================================================
+# FastAPI Application
+# ============================================================================
+
+app = FastAPI(title="RLM Sandbox Server", version="2.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Request/Response Models
+class ExecuteRequest(BaseModel):
+    code: str
+    
+class ExecuteResponse(BaseModel):
+    success: bool
+    output: str
+    error: Optional[str] = None
+
+class StatusResponse(BaseModel):
+    status: str
+    files_indexed: int
+    namespace_vars: List[str]
+
+class GetVarRequest(BaseModel):
+    name: str
+
+
+# Auth dependency
+async def verify_api_key(x_api_key: str = Header(None)):
+    if API_KEY and x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return True
+
+
+@app.get("/status", response_model=StatusResponse)
+async def get_status(auth: bool = Depends(verify_api_key)):
+    """Health check and status."""
+    user_vars = [k for k in global_namespace.keys() 
+                 if not k.startswith('_') and k not in 
+                 ('list_files', 'get_file_tree', 'read_file', 'search_files', 'llm_query', 'files')]
+    return StatusResponse(
+        status="ready",
+        files_indexed=len(file_index),
+        namespace_vars=user_vars
+    )
+
+
+@app.post("/execute", response_model=ExecuteResponse)
+async def execute(request: ExecuteRequest, auth: bool = Depends(verify_api_key)):
+    """Execute Python code in the persistent REPL."""
+    log(f"Executing code ({len(request.code)} chars)")
+    result = execute_code(request.code)
+    return ExecuteResponse(**result)
+
+
+@app.get("/files")
+async def get_files(pattern: str = "*", auth: bool = Depends(verify_api_key)):
+    """List indexed files."""
+    return {"files": list_files(pattern)}
+
+
+@app.get("/file/{path:path}")
+async def get_file(path: str, auth: bool = Depends(verify_api_key)):
+    """Read a specific file."""
+    content = read_file(path)
+    if content.startswith("Error") or content.startswith("File not found"):
+        raise HTTPException(status_code=404, detail=content)
+    return {"path": path, "content": content}
+
+
+@app.post("/reindex")
+async def reindex(auth: bool = Depends(verify_api_key)):
+    """Reindex the data directory."""
+    index_directory()
+    global_namespace['files'] = file_index
+    return {"files_indexed": len(file_index)}
+
+
+@app.post("/get_var")
+async def get_variable(request: GetVarRequest, auth: bool = Depends(verify_api_key)):
+    """Get a variable from the namespace."""
+    if request.name not in global_namespace:
+        raise HTTPException(status_code=404, detail=f"Variable '{request.name}' not found")
+    
+    value = global_namespace[request.name]
+    try:
+        json.dumps(value)
+        return {"success": True, "value": value}
+    except (TypeError, ValueError):
+        return {"success": True, "value": repr(value)}
+
+
+@app.post("/reset")
+async def reset_namespace(auth: bool = Depends(verify_api_key)):
+    """Reset the namespace (clear user variables)."""
+    global global_namespace
+    global_namespace = {}
+    initialize_namespace()
+    return {"status": "reset"}
+
+
+# ============================================================================
+# Startup
+# ============================================================================
+
+@app.on_event("startup")
+async def startup():
+    log("Starting RLM Sandbox Server...")
+    index_directory()
+    initialize_namespace()
+    log(f"Ready. Indexed {len(file_index)} files.")
 
 
 def main():
-    """
-    Main REPL loop. Reads JSON commands from stdin, executes them,
-    and writes JSON responses to stdout.
-    """
-    # Initialize the namespace with helper functions
-    # Use the built-in print - it will be captured by redirect_stdout during exec
-    global_namespace['llm_query'] = llm_query
+    """Run the server."""
+    port = int(os.environ.get("PORT", 8080))
+    host = os.environ.get("HOST", "0.0.0.0")
     
-    # Load context if available
-    context_msg = load_context()
-    
-    # Signal ready with JSON on stdout
-    send_response({
-        "status": "ready", 
-        "message": "RLM Sandbox initialized",
-        "context_info": context_msg
-    })
-    
-    # Main loop
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        
-        try:
-            command = json.loads(line)
-        except json.JSONDecodeError as e:
-            send_response({
-                "success": False,
-                "error": f"Invalid JSON: {e}"
-            })
-            continue
-        
-        action = command.get("action", "execute")
-        
-        if action == "execute":
-            code = command.get("code", "")
-            log(f"Executing code ({len(code)} chars)")
-            result = execute_code(code)
-            send_response(result)
-        
-        elif action == "get_var":
-            var_name = command.get("name", "")
-            if var_name in global_namespace:
-                value = global_namespace[var_name]
-                # Try to serialize, fall back to repr
-                try:
-                    json.dumps(value)
-                    result = {"success": True, "value": value}
-                except (TypeError, ValueError):
-                    result = {"success": True, "value": repr(value)}
-            else:
-                result = {"success": False, "error": f"Variable '{var_name}' not found"}
-            send_response(result)
-        
-        elif action == "list_vars":
-            # List all user-defined variables (exclude builtins and internals)
-            user_vars = {
-                k: type(v).__name__ 
-                for k, v in global_namespace.items() 
-                if not k.startswith('_') and k not in ('llm_query', 'context')
-            }
-            result = {"success": True, "variables": user_vars}
-            send_response(result)
-        
-        elif action == "ping":
-            result = {"success": True, "message": "pong"}
-            send_response(result)
-        
-        elif action == "shutdown":
-            result = {"success": True, "message": "Shutting down"}
-            send_response(result)
-            break
-        
-        else:
-            result = {"success": False, "error": f"Unknown action: {action}"}
-            send_response(result)
+    log(f"Starting server on {host}:{port}")
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":
