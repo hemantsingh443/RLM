@@ -35,14 +35,34 @@ RLM_DIRECTORY_PROMPT = '''You are an AI assistant that analyzes codebases using 
 ## Available Functions
 
 ```python
-print(list_files("*.py"))     # List files - MUST use print()!
-content = read_file("file.py") # Read file
-print(content[:500])           # Print first 500 chars
+# File operations
+print(list_files("*.py"))       # List files matching pattern
+content = read_file("file.py")  # Read a file's content
+matches = search_files("TODO")  # Search for pattern in all files
+
+# Recursive sub-agents
+result = llm_query("Summarize this code")  # Spawn a sub-agent
 ```
 
 **IMPORTANT**: Always use `print()` to see results!
 
 ## Files Indexed: {file_count}
+
+## Recursive Sub-Agents
+
+Use `llm_query(prompt)` to spawn a sub-agent for complex subtasks:
+
+```python
+# Example: Have a sub-agent analyze a specific file
+content = read_file("complex_module.py")
+summary = llm_query(f"Analyze this code and list all classes:\\n{{content[:3000]}}")
+print(summary)
+```
+
+Sub-agents have full tool access (can read files, execute code). Use them for:
+- Summarizing individual files before aggregating
+- Breaking down complex analysis into steps
+- Parallel analysis of different components
 
 ## Example Session
 
@@ -50,26 +70,27 @@ print(content[:500])           # Print first 500 chars
 ```python
 py_files = list_files("*.py")
 print(f"Found {{len(py_files)}} Python files:")
-for f in py_files:
+for f in py_files[:10]:
     print(f"  - {{f}}")
 ```
 
-**Turn 2** - Read key files:
+**Turn 2** - Analyze using sub-agent:
 ```python
-for f in py_files[:3]:
-    content = read_file(f)
-    print(f"\\n=== {{f}} ===")
-    # Print first line (usually docstring or import)
-    print(content[:300])
+# Use sub-agent for detailed analysis
+main_content = read_file("main.py")
+analysis = llm_query(f"What does this file do?\\n{{main_content[:2000]}}")
+print(analysis)
 ```
 
 **Turn 3** - Give final answer as PLAIN TEXT (not in code block):
+
+FINAL(Your comprehensive answer based on the analysis)
 
 ## CRITICAL RULES
 
 1. **Always use print()** - `list_files()` alone shows nothing!
 2. **FINAL() is NOT code** - Write it as plain text outside code blocks
-3. **Include real data** - Use actual file names and counts from your output
+3. **Use llm_query() for complex subtasks** - Sub-agents can help with detailed analysis
 '''
 
 

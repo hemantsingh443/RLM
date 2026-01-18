@@ -124,14 +124,17 @@ RLM/
 ├── Dockerfile              # HTTP server container
 ├── docker-compose.yml      # Easy deployment
 ├── repl_server.py          # FastAPI + REPL server
+├── tests/                  # Test suite
+│   └── test_rlm.py         # Unit and integration tests
 └── rlm/
     ├── agent.py            # Main orchestration loop
     ├── prompts.py          # System prompt templates
     ├── parser.py           # Response parsing
     └── clients/
         ├── openrouter.py   # LLM API client
-        ├── docker_sandbox.py # Local Docker client
-        └── remote_sandbox.py # Remote HTTP client
+        ├── docker_sandbox.py # Local Docker client (HTTP)
+        ├── remote_sandbox.py # Remote HTTP client
+        └── self_sandbox.py # In-process sandbox for sub-agents
 ```
 
 ## License

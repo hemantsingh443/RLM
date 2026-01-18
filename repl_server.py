@@ -149,50 +149,85 @@ def search_files(pattern: str, file_pattern: str = "*") -> List[Dict]:
 
 def llm_query(prompt: str, model: str = "xiaomi/mimo-v2-flash:free") -> str:
     """
-    Make a recursive LLM sub-call via OpenRouter.
+    Make a recursive LLM sub-call with context about available files.
+    
+    This is a simplified version that makes a single LLM call with file context,
+    rather than spawning a full agent loop (which was causing timeouts).
     
     Args:
-        prompt: The prompt to send
+        prompt: The task/question for the sub-agent
         model: Model to use
     
     Returns:
-        LLM response text
+        LLM response
     """
     import requests
     
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        return "Error: OPENROUTER_API_KEY not set"
+    log(f"llm_query called with prompt: {prompt[:100]}...")
     
+    # Check recursion depth
     current_depth = int(os.environ.get("RLM_RECURSION_DEPTH", "0"))
     max_depth = int(os.environ.get("RLM_MAX_RECURSION_DEPTH", "3"))
     
     if current_depth >= max_depth:
-        return f"Error: Max recursion depth ({max_depth}) reached"
+        log(f"Max recursion depth reached: {current_depth}")
+        return f"Error: Max recursion depth ({max_depth}) reached."
     
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        log("No API key found")
+        return "Error: OPENROUTER_API_KEY not set"
+    
+    # Increment recursion depth
     os.environ["RLM_RECURSION_DEPTH"] = str(current_depth + 1)
+    log(f"Recursion depth now: {current_depth + 1}")
     
     try:
+        # Build context about available files
+        file_list = list(file_index.keys())[:20]  # Limit to first 20
+        file_context = f"Available files: {file_list}"
+        
+        # Enhanced prompt with file context
+        enhanced_prompt = f"""You are a helpful assistant analyzing code/documents.
+
+{file_context}
+
+User request: {prompt}
+
+Provide a direct, helpful answer based on the information given."""
+
+        log(f"Making LLM request...")
+        
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         payload = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}]
+            "messages": [{"role": "user", "content": enhanced_prompt}],
+            "max_tokens": 1000
         }
         
         resp = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             json=payload,
             headers=headers,
-            timeout=120
+            timeout=60  # 60 second timeout for sub-calls
         )
         resp.raise_for_status()
-        return resp.json()['choices'][0]['message']['content']
+        
+        result = resp.json()['choices'][0]['message']['content']
+        log(f"LLM response received: {len(result)} chars")
+        return result
+        
+    except requests.Timeout:
+        log("LLM request timed out")
+        return "Error: LLM request timed out"
     except Exception as e:
+        log(f"LLM request error: {e}")
         return f"Error: {e}"
     finally:
+        # Restore recursion depth
         os.environ["RLM_RECURSION_DEPTH"] = str(current_depth)
 
 

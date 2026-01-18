@@ -30,7 +30,7 @@ class RLMAgent:
     """
     
     DEFAULT_MAX_TURNS = 15
-    DEFAULT_TRUNCATION_LIMIT = 2000
+    DEFAULT_TRUNCATION_LIMIT = 30000  # High limit to avoid retry loops
     
     def __init__(
         self,

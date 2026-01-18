@@ -7,11 +7,15 @@ RUN pip install --no-cache-dir \
     pandas \
     regex \
     fastapi \
-    uvicorn[standard]
+    uvicorn[standard] \
+    python-dotenv
 
 # Create directories
 WORKDIR /app
 RUN mkdir -p /mnt/data
+
+# Copy the RLM package (needed for recursive agent spawning)
+COPY rlm/ ./rlm/
 
 # Copy the server
 COPY repl_server.py .
@@ -23,6 +27,7 @@ EXPOSE 8080
 ENV PORT=8080
 ENV HOST=0.0.0.0
 ENV RLM_MAX_RECURSION_DEPTH=3
+ENV PYTHONPATH=/app
 
 # Run the HTTP server
 CMD ["python", "-u", "repl_server.py"]
