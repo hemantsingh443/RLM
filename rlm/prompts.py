@@ -65,12 +65,6 @@ for f in py_files[:3]:
 
 **Turn 3** - Give final answer as PLAIN TEXT (not in code block):
 
-FINAL(There are 8 Python files in this codebase:
-1. agent.py - Main RLM orchestration logic
-2. parser.py - Parses LLM responses for code blocks
-3. prompts.py - System prompt templates
-...)
-
 ## CRITICAL RULES
 
 1. **Always use print()** - `list_files()` alone shows nothing!
